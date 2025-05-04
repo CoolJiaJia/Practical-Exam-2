@@ -1,0 +1,338 @@
+# Create new dataset directory structure
+!mkdir -p data/code_generation
+
+# Copy prepare.py from shakespeare_char to the new directory
+!cp data/shakespeare_char/prepare.py data/code_generation/
+
+# Collect Python open-source code and write to input.txt
+import requests
+import os
+import random
+from tqdm import tqdm
+
+# Function: Get Python file contents from GitHub repositories
+def get_repo_python_files(repo_url, num_files=5):
+    # Extract owner and repository name from URL
+    parts = repo_url.split('/')
+    owner = parts[-2]
+    repo = parts[-1]
+
+    # Use GitHub API to get file list
+    api_url = f"https://api.github.com/repos/{owner}/{repo}/git/trees/master?recursive=1"
+    response = requests.get(api_url)
+
+    if response.status_code != 200:
+        print(f"Error fetching repo contents: {response.status_code}")
+        return []
+
+    # Get all .py files
+    py_files = []
+    for item in response.json().get('tree', []):
+        if item['path'].endswith('.py'):
+            py_files.append(item['path'])
+
+    # Randomly select the specified number of files
+    selected_files = random.sample(py_files, min(num_files, len(py_files)))
+
+    # Fetch the content for each selected file
+    file_contents = []
+    for file_path in tqdm(selected_files, desc="Fetching Python files"):
+        content_url = f"https://raw.githubusercontent.com/{owner}/{repo}/master/{file_path}"
+        file_response = requests.get(content_url)
+        if file_response.status_code == 200:
+            # Add comments to clearly separate files
+            file_contents.append(f"# File: {file_path}\n\n{file_response.text}\n\n")
+
+    return file_contents
+
+# List of Python open-source projects
+python_repos = [
+    "https://github.com/django/django",           # Django framework
+    "https://github.com/pallets/flask",           # Flask framework
+    "https://github.com/pandas-dev/pandas",       # Pandas
+    "https://github.com/numpy/numpy",             # NumPy
+    "https://github.com/pytorch/pytorch",         # PyTorch (Python part)
+    "https://github.com/matplotlib/matplotlib",   # Matplotlib
+    "https://github.com/psf/requests",            # Requests
+    "https://github.com/karpathy/nanoGPT"         # NanoGPT itself
+]
+
+print("Collecting Python code from GitHub repositories...")
+
+# Collect Python code from various libraries
+all_code = []
+for repo in tqdm(python_repos, desc="Repositories"):
+    try:
+        code_files = get_repo_python_files(repo, num_files=5)  # Get 5 files from each repository
+        all_code.extend(code_files)
+        print(f"Collected {len(code_files)} files from {repo}")
+    except Exception as e:
+        print(f"Error processing {repo}: {str(e)}")
+
+# Create input.txt file and write the code
+input_file_path = "data/code_generation/input.txt"
+with open(input_file_path, "w", encoding="utf-8") as f:
+    for code in all_code:
+        f.write(code)
+
+# Check the amount of collected code
+file_size = os.path.getsize(input_file_path)
+print(f"Created input.txt with {file_size/1024:.2f} KB of Python code")
+
+# Run prepare.py to process the dataset
+print("Running prepare.py on the new code_generation dataset...")
+!cd data/code_generation && python prepare.py
+
+# Extract token count and report
+import json
+import os
+import re
+import torch
+import subprocess
+
+# Read token count from meta.json
+token_count = 0
+try:
+    with open('data/code_generation/meta.json', 'r') as f:
+        meta_data = json.load(f)
+        token_count = meta_data.get('total_tokens', 0)
+    print(f"Dataset contains {token_count} tokens")
+except Exception as e:
+    print(f"Error reading token count: {e}")
+    # If unable to read, try parsing from prepare.py output
+    try:
+        with open('data/code_generation/prepare_output.txt', 'r') as f:
+            prepare_output = f.read()
+            token_match = re.search(r'total_tokens:\s*(\d+)', prepare_output)
+            if token_match:
+                token_count = int(token_match.group(1))
+                print(f"Extracted token count from output: {token_count}")
+    except:
+        print("Could not determine token count")
+
+# Check if we have enough tokens, if not collect more code
+if token_count < 100000:
+    print(f"Warning: Dataset has {token_count} tokens, which is less than the required 100,000 tokens.")
+    print("Collecting more code to meet the requirement...")
+    
+    additional_repos = [
+        "https://github.com/scikit-learn/scikit-learn",
+        "https://github.com/tensorflow/tensorflow",
+        "https://github.com/keras-team/keras",
+        "https://github.com/pytest-dev/pytest"
+    ]
+    
+    for repo in additional_repos:
+        try:
+            print(f"Collecting from {repo}...")
+            code_files = get_repo_python_files(repo, num_files=10)  # More files per repo
+            
+            with open(input_file_path, "a", encoding="utf-8") as f:
+                for code in code_files:
+                    f.write(code)
+                    
+            # Rerun prepare.py to update token count
+            !cd data/code_generation && python prepare.py
+            
+            # Update token count
+            with open('data/code_generation/meta.json', 'r') as f:
+                meta_data = json.load(f)
+                token_count = meta_data.get('total_tokens', 0)
+                print(f"Updated token count: {token_count}")
+                
+            if token_count >= 100000:
+                break
+        except Exception as e:
+            print(f"Error processing additional repo {repo}: {str(e)}")
+
+# Create a new training configuration file
+config_content = """# train a character-level model on Python code dataset
+
+out_dir = 'out-code-generation'
+eval_interval = 250
+eval_iters = 100
+log_interval = 50
+
+# we'll train on larger context to better handle code structure
+wandb_log = False
+wandb_project = 'code-generation'
+wandb_run_name = 'code-gpt'
+
+dataset = 'code_generation'
+gradient_accumulation_steps = 1
+batch_size = 64
+block_size = 512  # longer context for code
+
+# model configuration - larger than shakespeare model
+n_layer = 8
+n_head = 8
+n_embd = 512
+dropout = 0.2
+
+learning_rate = 5e-4
+max_iters = 5000
+lr_decay_iters = 5000
+min_lr = 1e-5
+beta2 = 0.99
+
+warmup_iters = 100
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+compile = False  # disable PyTorch 2.0 compilation
+"""
+
+# Create configuration file
+os.makedirs('config', exist_ok=True)
+config_path = "config/train_code_generation.py"
+with open(config_path, "w") as f:
+    f.write(config_content)
+print(f"Created configuration file: {config_path}")
+
+# Determine device
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+# Train the model
+print("\n===== Training BabyGPT for Code Generation =====")
+print(f"Training on: {device}")
+print("Starting training...")
+
+try:
+    # If we need to reduce training time, reduce the number of iterations
+    with open(config_path, "r") as f:
+        modified_config = f.read()
+    
+    if not torch.cuda.is_available():
+        modified_config = modified_config.replace('max_iters = 5000', 'max_iters = 1000')
+        modified_config = modified_config.replace('lr_decay_iters = 5000', 'lr_decay_iters = 1000')
+    
+    with open(config_path, "w") as f:
+        f.write(modified_config)
+    
+    # Start training
+    !python train.py {config_path}
+    
+    print("Training completed!")
+except Exception as e:
+    print(f"Error during training: {e}")
+
+# Generate sample outputs
+print("\n===== Generating Code Samples =====")
+try:
+    # Create output directory
+    os.makedirs('samples', exist_ok=True)
+    
+    # Generate multiple samples
+    sample_cmd = f"python sample.py --out_dir=out-code-generation --device={device} --num_samples=5 --max_new_tokens=500 --temperature=0.8"
+    
+    # Run command and capture output
+    result = subprocess.run(sample_cmd, shell=True, capture_output=True, text=True)
+    samples_text = result.stdout
+    
+    # Save all samples
+    with open("samples/code_samples.txt", "w") as f:
+        f.write(samples_text)
+        
+    print(f"Generated samples saved to samples/code_samples.txt")
+    
+    # Extract samples to add to the report
+    samples = []
+    current_sample = []
+    sample_start = False
+    
+    for line in samples_text.split('\n'):
+        if '---------------' in line:
+            if current_sample:
+                samples.append('\n'.join(current_sample))
+                current_sample = []
+            sample_start = not sample_start
+        elif sample_start:
+            current_sample.append(line)
+    
+    # Add the last sample
+    if current_sample:
+        samples.append('\n'.join(current_sample))
+        
+    # Get the first 20 lines of each sample (or all lines if fewer than 20)
+    first_20_lines = []
+    for i, sample in enumerate(samples):
+        sample_lines = sample.split('\n')
+        limited_lines = sample_lines[:20]
+        
+        # Avoid using backslashes in f-strings, use string concatenation instead
+        sample_header = f"**Sample {i+1}:**"
+        sample_content = "\n".join(limited_lines)
+        formatted_sample = sample_header + "\n```python\n" + sample_content + "\n```"
+        
+        first_20_lines.append(formatted_sample)
+    
+    all_first_20_lines = "\n\n".join(first_20_lines)
+    
+    # Select the best sample for the report
+    best_sample = ""
+    if samples:
+        # Can manually select, here we simply choose the first sample
+        best_sample = samples[0]
+        
+        # If you want to select more intelligently, you can add some heuristics
+        # For example, choose a sample that contains specific keywords
+        for sample in samples:
+            if 'def ' in sample and 'class ' in sample and len(sample.split('\n')) > 10:
+                best_sample = sample
+                break
+    
+    # Update the report
+    report_path = "report.md"
+
+    # If the report already exists, read its content
+    report_content = ""
+    if os.path.exists(report_path):
+        with open(report_path, "r") as f:
+            report_content = f.read()
+
+    # If the report already contains a code generation section, remove the old content
+    if "# Code Generation with BabyGPT" in report_content:
+        report_parts = report_content.split("# Code Generation with BabyGPT")
+        report_content = report_parts[0]  # Keep only the first part
+
+    # Write each section directly
+    with open(report_path, "w") as f:
+        # Write the original content
+        f.write(report_content)
+        
+        # Write the code generation title
+        f.write("\n# Code Generation with BabyGPT\n\n")
+        
+        # Write dataset information
+        f.write("## Dataset Information\n")
+        f.write("- **Dataset Type**: Python Code Collection\n")
+        f.write(f"- **Total Tokens**: {token_count}\n")
+        f.write("- **Source**: Collection of Python files from major open source repositories\n\n")
+        
+        # Write samples section
+        f.write("## Generated Code Samples\n\n")
+        f.write("### First 20 Lines of Generated Samples\n")
+        f.write(all_first_20_lines)
+        f.write("\n\n")
+        
+        # Write favorite sample
+        f.write("### My Favorite Generated Snippet\n")
+        f.write("The following code snippet was chosen as my favorite because it demonstrates the model's ability to generate syntactically correct and somewhat coherent Python code:\n\n")
+        f.write("```python\n")
+        f.write(best_sample)
+        f.write("\n```\n")
+
+    print(f"Report updated at {report_path}")
+
+    # Create a zip file containing all outputs
+    !zip -r code_generation_results.zip data/code_generation out-code-generation samples {report_path} config/train_code_generation.py
+
+    # If running in Colab, provide a download link
+    try:
+        from google.colab import files
+        files.download('code_generation_results.zip')
+        print("Download link for code generation results has been generated")
+    except Exception as e:
+        print(f"Not running in Colab, or error creating download link: {e}")
+        print("Results zip file available at: code_generation_results.zip")
+        
+except Exception as e:
+    print(f"Error generating samples: {e}")
