@@ -1,0 +1,49 @@
+# Clone the nanoGPT repository
+!git clone https://github.com/karpathy/nanoGPT.git
+%cd nanoGPT
+
+# Install dependencies (Colab already has torch/numpy, adding tiktoken)
+!pip install tiktoken
+
+# Prepare Shakespeare data
+!python data/shakespeare_char/prepare.py
+
+# Modify configuration to avoid CUDA compilation errors (disable torch.compile)
+config_path = "config/train_shakespeare_char.py"
+
+with open(config_path, "a") as f:
+    f.write("\ncompile = False\n")
+
+# Start training the model (default 5000 iterations)
+!python train.py config/train_shakespeare_char.py
+
+# Generate text samples and save to a local file
+!python sample.py --out_dir=out-shakespeare-char > shakespeare_sample.txt
+
+# Extract the first 3 lines from the generated text for report.md
+import re
+
+# Read the generated sample
+with open("shakespeare_sample.txt", "r") as f:
+    sample_text = f.read()
+
+# Extract the first 3 non-empty lines of content
+lines = [line.strip() for line in sample_text.split('\n') if line.strip()]
+first_three_lines = lines[:3]
+
+# Create report.md with the first 3 lines
+report_content = """# Shakespeare Character-level Model Training Results
+
+## Generated Sample (First 3 Lines)
+This sample was generated using a character-level GPT model trained on Shakespeare's works.
+""".format('\n'.join(first_three_lines))
+
+with open("report.md", "w") as f:
+    f.write(report_content)
+
+print("Created report.md with the first 3 lines of generated text")
+
+# Package and download the model and samples
+!zip -r nanoGPT_output.zip out-shakespeare-char shakespeare_sample.txt report.md
+from google.colab import files
+files.download('nanoGPT_output.zip')
